@@ -19,6 +19,7 @@ class App:
 
         self.pdf_files: List[str] = []
         self.results = []
+        self.use_ocr = False
 
         self.setup_ui()
 
@@ -59,6 +60,16 @@ class App:
 
         self.extract_btn = ttk.Button(action_frame, text="开始提取", command=self.start_extraction)
         self.extract_btn.pack(side=tk.LEFT, padx=5)
+
+        # OCR 选项
+        self.ocr_var = tk.BooleanVar(value=False)
+        self.ocr_check = ttk.Checkbutton(
+            action_frame,
+            text="启用OCR（识别图片中的文字）",
+            variable=self.ocr_var,
+            command=self.on_ocr_toggle
+        )
+        self.ocr_check.pack(side=tk.LEFT, padx=20)
 
         self.export_json_btn = ttk.Button(action_frame, text="导出JSON", command=self.export_json, state=tk.DISABLED)
         self.export_json_btn.pack(side=tk.LEFT, padx=5)
@@ -133,6 +144,10 @@ class App:
         keywords = [k.strip() for k in content.split('\n') if k.strip()]
         return keywords
 
+    def on_ocr_toggle(self):
+        """OCR复选框切换事件"""
+        self.use_ocr = self.ocr_var.get()
+
     def start_extraction(self):
         """开始提取"""
         if not self.pdf_files:
@@ -154,7 +169,9 @@ class App:
     def extract_worker(self, keywords: List[str]):
         """提取工作线程"""
         try:
-            self.results = search_papers_for_keywords(self.pdf_files, keywords, self.update_progress)
+            self.results = search_papers_for_keywords(
+                self.pdf_files, keywords, self.update_progress, self.use_ocr
+            )
             self.root.after(0, self.extraction_complete)
         except Exception as e:
             self.root.after(0, lambda: messagebox.showerror("错误", str(e)))

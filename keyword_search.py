@@ -7,7 +7,8 @@ from pdf_processor import extract_text_from_pdf, get_sentences_with_context
 def search_papers_for_keywords(
     pdf_files: List[str],
     keywords: List[str],
-    progress_callback: Optional[Callable[[int, int, str], None]] = None
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    use_ocr: bool = False
 ) -> List[Dict[str, Any]]:
     """
     在多个PDF论文中搜索关键词并提取完整句子
@@ -16,6 +17,7 @@ def search_papers_for_keywords(
         pdf_files: PDF文件路径列表
         keywords: 关键词列表
         progress_callback: 进度回调函数 (current, total, message)
+        use_ocr: 是否启用OCR识别图片文字
 
     Returns:
         结果列表，每项包含 paper, path, keywords_found
@@ -28,7 +30,7 @@ def search_papers_for_keywords(
             filename = pdf_path.split('/')[-1].split('\\')[-1]
             progress_callback(i, total, filename)
 
-        result = search_single_paper(pdf_path, keywords)
+        result = search_single_paper(pdf_path, keywords, use_ocr)
         results.append(result)
 
     if progress_callback:
@@ -37,10 +39,10 @@ def search_papers_for_keywords(
     return results
 
 
-def search_single_paper(pdf_path: str, keywords: List[str]) -> Dict[str, Any]:
+def search_single_paper(pdf_path: str, keywords: List[str], use_ocr: bool = False) -> Dict[str, Any]:
     """搜索单篇论文"""
     try:
-        title, text = extract_text_from_pdf(pdf_path)
+        title, text = extract_text_from_pdf(pdf_path, use_ocr)
     except Exception as e:
         return {
             "paper": pdf_path.split('/')[-1].split('\\')[-1],

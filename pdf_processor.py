@@ -2,13 +2,19 @@
 import re
 import fitz  # PyMuPDF
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+from io import BytesIO
 
 
-def extract_text_from_pdf(pdf_path: str) -> Tuple[str, str]:
+def extract_text_from_pdf(pdf_path: str, use_ocr: bool = False) -> Tuple[str, str]:
     """
     从PDF提取文本和标题（按阅读顺序）
-    返回: (标题, 完整文本)
+
+    Args:
+        pdf_path: PDF文件路径
+        use_ocr: 是否启用OCR识别图片中的文字
+
+    Returns: (标题, 完整文本)
     """
     doc = fitz.open(pdf_path)
     full_text = []
@@ -23,6 +29,17 @@ def extract_text_from_pdf(pdf_path: str) -> Tuple[str, str]:
     doc.close()
 
     combined_text = "\n".join(full_text)
+
+    # 如果启用OCR，提取图片中的文字
+    if use_ocr:
+        try:
+            ocr_text = extract_ocr_text_from_pdf(pdf_path)
+            if ocr_text:
+                combined_text += "\n[OCR识别内容]\n" + ocr_text
+        except Exception as e:
+            # OCR失败时记录错误但不中断流程
+            print(f"OCR处理警告: {e}")
+
     # 尝试从第一页提取标题（通常是最大的文字）
     title = extract_title_from_text(combined_text) or Path(pdf_path).stem
 
@@ -167,3 +184,74 @@ def get_sentences_with_context(text: str, keyword: str, context_chars: int = 50)
             matching_sentences.append(sentence)
 
     return matching_sentences
+
+
+def extract_images_from_pdf(pdf_path: str) -> List[bytes]:
+    """
+    从PDF中提取所有图片的字节数据
+
+    Args:
+        pdf_path: PDF文件路径
+
+    Returns:
+        图片字节数据列表
+    """
+    images = []
+    doc = fitz.open(pdf_path)
+
+    for page_num, page in enumerate(doc):
+        image_list = page.get_images(full=True)
+        for img_index, img in enumerate(image_list):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image["image"]
+            images.append(image_bytes)
+
+    doc.close()
+    return images
+
+
+def extract_ocr_text_from_pdf(pdf_path: str, lang: List[str] = None) -> str:
+    """
+    从PDF中的图片提取文字（OCR）
+
+    Args:
+        pdf_path: PDF文件路径
+        lang: OCR语言列表，默认['en', 'ch_sim']
+
+    Returns:
+        识别出的文本
+    """
+    if lang is None:
+        lang = ['en', 'ch_sim']
+
+    import easyocr
+
+    images = extract_images_from_pdf(pdf_path)
+    if not images:
+        return ""
+
+    all_text = []
+    # 复用同一个 reader 实例以提高效率
+    reader = easyocr.Reader(lang, gpu=False, verbose=False)
+
+    for img_bytes in images:
+        try:
+            image = fitz.open(stream=img_bytes, filetype="png")
+            page = image[0]
+            mat = fitz.Matrix(2, 2)  # 2x放大以提高识别精度
+            clip = page.rect
+            pix = page.get_pixmap(matrix=mat, clip=clip)
+            img_data = pix.tobytes("png")
+            image.close()
+
+            # 使用EasyOCR识别
+            results = reader.readtext(img_data)
+            for detection in results:
+                text = detection[1].strip()
+                if text:
+                    all_text.append(text)
+        except Exception as e:
+            continue
+
+    return " ".join(all_text)
