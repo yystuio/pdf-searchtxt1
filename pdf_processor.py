@@ -115,10 +115,11 @@ def extract_title_from_text(text: str) -> str:
     return ""
 
 
-def split_into_sentences(text: str) -> List[str]:
+def split_into_sentences(text: str, max_sentence_length: int = 500) -> List[str]:
     """
     将文本分割成句子
     支持中英文标点，并合并PDF中分散的短句
+    对超长段落进行强制分割，防止参考文献等噪音内容
     """
     # 中英文句子结束标点
     sentence_endings = re.compile(r'[。！？.!?]+')
@@ -141,7 +142,109 @@ def split_into_sentences(text: str) -> List[str]:
     # 合并过短的句子（PDF文本块分散问题）
     sentences = merge_short_sentences(sentences)
 
-    return sentences
+    # 强制分割超长句子（通常是没有句号的长段落）
+    final_sentences = []
+    for sent in sentences:
+        if len(sent) > max_sentence_length:
+            parts = split_long_sentence(sent, max_sentence_length)
+            final_sentences.extend(parts)
+        else:
+            final_sentences.append(sent)
+
+    return final_sentences
+
+
+def split_long_sentence(text: str, max_length: int = 500) -> List[str]:
+    """强制分割超长句子，优先按换行分割，其次按逗号/分号分割"""
+    lines = text.split('\n')
+    result = []
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if len(line) > max_length:
+            parts = re.split(r'[,，;；]', line)
+            current = ""
+            for part in parts:
+                if len(current) + len(part) < max_length:
+                    current = (current + "，" + part).strip("，")
+                else:
+                    if current:
+                        result.append(current)
+                    current = part
+            if current:
+                result.append(current)
+        else:
+            result.append(line)
+
+    return result
+
+
+def is_noise_sentence(sentence: str) -> bool:
+    """判断句子是否为噪音内容（参考文献、图表说明等）"""
+    if not sentence or len(sentence.strip()) < 10:
+        return True
+    stripped = sentence.strip()
+
+    # 过滤期刊标题信息
+    if re.match(r'^第\d+卷|第\d+期|Vol\.|No\.|ISSN|doi:', stripped, re.IGNORECASE):
+        return True
+    if re.search(r'大连海洋大学学报|学报\s*Vol|Journal\s*of', stripped):
+        return True
+
+    # 过滤参考文献类内容
+    if re.match(r'^\[\d+\]', stripped):
+        return True
+    if re.match(r'^\[\d+\]\s+[\u4e00-\u9fa5]', stripped):  # [1] 作者...
+        return True
+    if re.match(r'^\d+\.', stripped):
+        return True
+    if re.match(r'^[A-Z][a-zA-Z\s]+,\s*[A-Z][a-zA-Z\s]+,?\s+et\s+al', stripped):
+        return True  # 英文参考文献作者行
+
+    # 过滤DOI、URL
+    if re.match(r'^(doi:|http)', stripped.lower()):
+        return True
+
+    # 过滤纯数字行
+    digit_ratio = sum(c.isdigit() for c in stripped) / len(stripped) if stripped else 0
+    if digit_ratio > 0.5:
+        return True
+
+    # 过滤图表标题
+    if re.search(r'^(图|Figure|Tab\.|表)\s*\d', stripped, re.IGNORECASE):
+        return True
+    if re.search(r'^\d+\s*(图|Figure|表|Tab)', stripped):
+        return True
+
+    # 过滤英文摘要关键词行
+    if re.match(r'^(Key words:|Keywords:|Abstract:)', stripped, re.IGNORECASE):
+        return True
+
+    # 过滤中图分类号、文献标志码
+    if re.match(r'^中图分类号|^文献标志码', stripped):
+        return True
+
+    # 过滤关键词行
+    if re.match(r'^关键词[:：]', stripped):
+        return True
+    if re.search(r'^[A-Z][a-z]+\s+[A-Z][a-z]+.*(?:et al|,?\s*eds?)', stripped, re.I):
+        return True
+
+    # 过滤章节标题（纯数字或数字+标题）
+    if re.match(r'^\d+\s+[\u4e00-\u9fa5]{2,10}$', stripped):
+        return True
+    if re.match(r'^\d+\.\d+', stripped):  # 1.2 小节格式
+        return True
+
+    # 过滤作者、单位信息
+    if re.match(r'^作者[:：]', stripped):
+        return True
+    if re.search(r'\d{4}[-年]\d{1,2}[-月]', stripped):  # 日期
+        return True
+
+    return False
 
 
 def merge_short_sentences(sentences: List[str], min_length: int = 15) -> List[str]:
@@ -175,11 +278,16 @@ def get_sentences_with_context(text: str, keyword: str, context_chars: int = 50)
     """
     获取包含关键词的完整句子
     在句子前后添加上下文
+    自动过滤参考文献等噪音内容
     """
     sentences = split_into_sentences(text)
     matching_sentences = []
 
     for sentence in sentences:
+        # 过滤噪音内容
+        if is_noise_sentence(sentence):
+            continue
+
         if keyword.lower() in sentence.lower():
             matching_sentences.append(sentence)
 

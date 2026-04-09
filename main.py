@@ -8,7 +8,13 @@ from typing import List
 
 from pdf_processor import extract_text_from_pdf, get_sentences_with_context
 from keyword_search import search_papers_for_keywords
-from result_exporter import export_to_json, export_to_markdown
+from result_exporter import export_to_json, export_to_markdown, export_to_xls
+from llm_enhancer import (
+    polish_ocr_in_background,
+    summarize_knowledge_in_background,
+    recommend_keywords_in_background
+)
+from llm_client import LLMClient
 
 
 class App:
@@ -20,6 +26,9 @@ class App:
         self.pdf_files: List[str] = []
         self.results = []
         self.use_ocr = False
+        self.llm_client = LLMClient()
+        self.llm_available = False
+        self.recommended_keywords = []  # LLM 推荐的关键词
 
         self.setup_ui()
 
@@ -76,6 +85,50 @@ class App:
 
         self.export_md_btn = ttk.Button(action_frame, text="导出Markdown", command=self.export_markdown, state=tk.DISABLED)
         self.export_md_btn.pack(side=tk.LEFT, padx=5)
+
+        self.export_xls_btn = ttk.Button(action_frame, text="整理导出XLS", command=self.export_xls, state=tk.DISABLED)
+        self.export_xls_btn.pack(side=tk.LEFT, padx=5)
+
+        # LLM 功能区域
+        llm_frame = ttk.LabelFrame(self.root, text="LLM 增强功能")
+        llm_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        llm_btn_frame = ttk.Frame(llm_frame)
+        llm_btn_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        self.check_llm_btn = ttk.Button(
+            llm_btn_frame,
+            text="检查LLM服务",
+            command=self.check_llm_service
+        )
+        self.check_llm_btn.pack(side=tk.LEFT, padx=5)
+
+        self.llm_status_label = ttk.Label(llm_btn_frame, text="LLM服务: 未检测")
+        self.llm_status_label.pack(side=tk.LEFT, padx=10)
+
+        self.recommend_keywords_btn = ttk.Button(
+            llm_btn_frame,
+            text="AI推荐关键词",
+            command=self.start_keyword_recommendation,
+            state=tk.DISABLED
+        )
+        self.recommend_keywords_btn.pack(side=tk.LEFT, padx=5)
+
+        self.polish_ocr_btn = ttk.Button(
+            llm_btn_frame,
+            text="润色OCR结果",
+            command=self.start_ocr_polish,
+            state=tk.DISABLED
+        )
+        self.polish_ocr_btn.pack(side=tk.LEFT, padx=5)
+
+        self.summarize_btn = ttk.Button(
+            llm_btn_frame,
+            text="AI总结知识",
+            command=self.start_knowledge_summary,
+            state=tk.DISABLED
+        )
+        self.summarize_btn.pack(side=tk.LEFT, padx=5)
 
         # 状态显示
         self.status_var = tk.StringVar(value="就绪")
@@ -189,6 +242,7 @@ class App:
         self.extract_btn.config(state=tk.NORMAL)
         self.export_json_btn.config(state=tk.NORMAL)
         self.export_md_btn.config(state=tk.NORMAL)
+        self.export_xls_btn.config(state=tk.NORMAL)
         self.progress.config(value=100)
         self.status_var.set(f"提取完成，共处理 {len(self.results)} 篇论文")
 
@@ -244,6 +298,217 @@ class App:
                 messagebox.showinfo("成功", f"已导出到:\n{file}")
             except Exception as e:
                 messagebox.showerror("错误", str(e))
+
+    def export_xls(self):
+        """导出整理后的XLS"""
+        if not self.results:
+            return
+
+        # 检查是否有 LLM 可用
+        use_llm = self.llm_available
+        if use_llm:
+            available, _ = self.llm_client.is_available()
+            use_llm = available
+
+        file = filedialog.asksaveasfilename(
+            title="保存XLS文件",
+            defaultextension=".xlsx",
+            filetypes=[("Excel文件", "*.xlsx")]
+        )
+        if file:
+            self.export_xls_btn.config(state=tk.DISABLED)
+            self.status_var.set("正在整理导出...")
+
+            # 在后台线程执行（LLM 整理较慢）
+            thread = threading.Thread(
+                target=self._export_xls_worker,
+                args=(file, self.llm_client if use_llm else None)
+            )
+            thread.start()
+
+    def _export_xls_worker(self, file: str, llm_client):
+        """XLS 导出工作线程"""
+        try:
+            export_to_xls(
+                self.results,
+                file,
+                llm_client=llm_client,
+                progress_callback=self.update_progress
+            )
+            self.root.after(0, lambda: self._export_xls_complete(file))
+        except ImportError as e:
+            self.root.after(0, lambda: messagebox.showerror("错误", str(e)))
+            self.root.after(0, self._export_xls_complete_error)
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("错误", str(e)))
+            self.root.after(0, self._export_xls_complete_error)
+
+    def _export_xls_complete(self, file: str):
+        """XLS 导出完成"""
+        self.export_xls_btn.config(state=tk.NORMAL)
+        self.status_var.set("导出完成")
+        messagebox.showinfo("成功", f"已导出到:\n{file}")
+
+    def _export_xls_complete_error(self):
+        """XLS 导出失败"""
+        self.export_xls_btn.config(state=tk.NORMAL)
+        self.status_var.set("导出失败")
+
+    def check_llm_service(self):
+        """检查 LLM 服务是否可用"""
+        self.check_llm_btn.config(state=tk.DISABLED)
+        self.status_var.set("正在检测 LLM 服务...")
+
+        def worker():
+            try:
+                available, error = self.llm_client.is_available()
+                self.root.after(0, lambda: self._update_llm_status(available, error))
+            except Exception as e:
+                self.root.after(0, lambda: self._update_llm_status(False, str(e)))
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+
+    def _update_llm_status(self, available: bool, error: str = ""):
+        """更新 LLM 状态显示"""
+        self.check_llm_btn.config(state=tk.NORMAL)
+        self.llm_available = available
+
+        if available:
+            self.llm_status_label.config(text="LLM服务: 已连接", foreground="green")
+            self.recommend_keywords_btn.config(state=tk.NORMAL)
+            self.polish_ocr_btn.config(state=tk.NORMAL)
+            self.summarize_btn.config(state=tk.NORMAL)
+            messagebox.showinfo("成功", "LLM 服务已连接！")
+        else:
+            self.llm_status_label.config(text=f"LLM服务: 不可用", foreground="red")
+            messagebox.showwarning("警告", f"无法连接 LLM 服务\n\n请确保 CC-switch 已启动并配置了 API Provider。\n\n错误: {error or '未知错误'}")
+
+        self.status_var.set("就绪")
+
+    def start_keyword_recommendation(self):
+        """开始 AI 关键词推荐"""
+        if not self.pdf_files:
+            messagebox.showwarning("警告", "请先选择PDF文件！")
+            return
+
+        self.recommend_keywords_btn.config(state=tk.DISABLED)
+        self.status_var.set("正在推荐关键词...")
+
+        thread = threading.Thread(target=self.keyword_recommendation_worker)
+        thread.start()
+
+    def keyword_recommendation_worker(self):
+        """关键词推荐工作线程"""
+        try:
+            self.recommended_keywords = recommend_keywords_in_background(
+                self.pdf_files, self.update_progress
+            )
+            self.root.after(0, self.keyword_recommendation_complete)
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("错误", f"关键词推荐失败: {e}"))
+            self.root.after(0, lambda: self._enable_llm_buttons())
+
+    def keyword_recommendation_complete(self):
+        """关键词推荐完成"""
+        self.recommend_keywords_btn.config(state=tk.NORMAL)
+        self.status_var.set("关键词推荐完成")
+
+        # 显示推荐的关键词
+        self.result_text.delete('1.0', tk.END)
+        self.result_text.insert(tk.END, "📋 AI 推荐的关键词\n\n")
+
+        for rec in self.recommended_keywords:
+            self.result_text.insert(tk.END, f"📄 {rec['paper']}\n")
+            keywords = rec.get('recommended_keywords', [])
+            if keywords:
+                self.result_text.insert(tk.END, f"   推荐关键词: {', '.join(keywords)}\n")
+            else:
+                error = rec.get('error', '无')
+                self.result_text.insert(tk.END, f"   错误: {error}\n")
+            self.result_text.insert(tk.END, "\n")
+
+        # 可以选择导入推荐关键词
+        if any(rec.get('recommended_keywords') for rec in self.recommended_keywords):
+            self._offer_to_import_keywords()
+
+    def _offer_to_import_keywords(self):
+        """询问用户是否导入推荐的关键词"""
+        if messagebox.askyesno("导入关键词", "是否将推荐的关键词导入到关键词输入框？"):
+            self._import_recommended_keywords()
+
+    def _import_recommended_keywords(self):
+        """导入推荐的关键词到输入框"""
+        all_keywords = []
+        for rec in self.recommended_keywords:
+            all_keywords.extend(rec.get('recommended_keywords', []))
+
+        if all_keywords:
+            unique_keywords = list(set(all_keywords))
+            self.keyword_text.delete('1.0', tk.END)
+            self.keyword_text.insert('1.0', '\n'.join(unique_keywords))
+
+    def start_ocr_polish(self):
+        """开始润色 OCR 结果"""
+        if not self.results:
+            messagebox.showwarning("警告", "请先执行关键词提取！")
+            return
+
+        self.polish_ocr_btn.config(state=tk.DISABLED)
+        self.status_var.set("正在润色 OCR 结果...")
+
+        thread = threading.Thread(target=self.ocr_polish_worker)
+        thread.start()
+
+    def ocr_polish_worker(self):
+        """OCR 润色工作线程"""
+        try:
+            polished_results = polish_ocr_in_background(self.results, self.update_progress)
+            self.results = polished_results
+            self.root.after(0, self.ocr_polish_complete)
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("错误", f"OCR 润色失败: {e}"))
+            self.root.after(0, lambda: self._enable_llm_buttons())
+
+    def ocr_polish_complete(self):
+        """OCR 润色完成"""
+        self.polish_ocr_btn.config(state=tk.NORMAL)
+        self.status_var.set("OCR 润色完成")
+        self.preview_results()
+
+    def start_knowledge_summary(self):
+        """开始 AI 知识总结"""
+        if not self.results:
+            messagebox.showwarning("警告", "请先执行关键词提取！")
+            return
+
+        self.summarize_btn.config(state=tk.DISABLED)
+        self.status_var.set("正在总结知识...")
+
+        thread = threading.Thread(target=self.knowledge_summary_worker)
+        thread.start()
+
+    def knowledge_summary_worker(self):
+        """知识总结工作线程"""
+        try:
+            summarized_results = summarize_knowledge_in_background(self.results, self.update_progress)
+            self.results = summarized_results
+            self.root.after(0, self.knowledge_summary_complete)
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("错误", f"知识总结失败: {e}"))
+            self.root.after(0, lambda: self._enable_llm_buttons())
+
+    def knowledge_summary_complete(self):
+        """知识总结完成"""
+        self.summarize_btn.config(state=tk.NORMAL)
+        self.status_var.set("知识总结完成")
+        self.preview_results()
+
+    def _enable_llm_buttons(self):
+        """启用 LLM 按钮"""
+        if self.llm_available:
+            self.polish_ocr_btn.config(state=tk.NORMAL)
+            self.summarize_btn.config(state=tk.NORMAL)
 
 
 def main():
